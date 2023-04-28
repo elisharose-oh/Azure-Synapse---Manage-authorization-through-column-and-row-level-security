@@ -1,0 +1,247 @@
+https://learn.microsoft.com/en-us/training/modules/secure-data-warehouse-azure-synapse-analytics/6-exercise-manage-authorization-through-column-row-level-security
+
+#Manage authorization through column and row level security
+
+#The syntax to use for implementing column level security looks as follows:
+
+GRANT <permission> [ ,...n ] ON
+    [ OBJECT :: ][ schema_name ]. object_name [ ( column [ ,...n ] ) ] // specifying the column access
+    TO <database_principal> [ ,...n ]
+    [ WITH GRANT OPTION ]
+    [ AS <database_principal> ]
+<permission> ::=
+    SELECT
+  | UPDATE
+<database_principal> ::=
+      Database_user // specifying the database user
+    | Database_role // specifying the database role 
+    | Database_user_mapped_to_Windows_User
+    | Database_user_mapped_to_Windows_Group
+    
+#An example of column level security
+
+#The following example shows how to restrict TestUser from accessing the SSN column of the Membership table
+#Create Membership table with SSN column used to store social security numbers
+CREATE TABLE Membership
+  (MemberID int IDENTITY,
+   FirstName varchar(100) NULL,
+   SSN char(9) NOT NULL,
+   LastName varchar(100) NOT NULL,
+   Phone varchar(12) NULL,
+   Email varchar(100) NULL);
+   
+#Allow TestUser to access all columns except for the SSN column, which has the sensitive data
+
+GRANT SELECT ON Membership(MemberID, FirstName, LastName, Phone, Email) TO TestUser;
+
+#Queries executed as TestUser will fail if they include the SSN column
+SELECT * FROM Membership;
+
+-- Msg 230, Level 14, State 1, Line 12
+-- The SELECT permission was denied on the column 'SSN' of the object 'Membership', database 'CLS_TestDW', schema 'dbo'.
+
+#An example of row-level security
+#This short example creates three users and an external table with six rows
+#It then creates an inline table-valued function and a security policy for the external table
+#Prerequisites: You must have a SQL pool, 
+The server hosting your SQL pool must be registered with AAD and you must have an Azure storage account with Storage Blog Contributor permissions,
+Create a file system for your Azure Storage account. Use Storage Explorer to view your storage account. Right click on containers and select Create file system.
+
+
+#The example shows how select statements are filtered for the various users
+
+--run in master
+CREATE LOGIN Manager WITH PASSWORD = '<user_password>'
+GO
+CREATE LOGIN Sales1 WITH PASSWORD = '<user_password>'
+GO
+CREATE LOGIN Sales2 WITH PASSWORD = '<user_password>'
+GO
+
+--run in master and your SQL pool database
+CREATE USER Manager FOR LOGIN Manager;  
+CREATE USER Sales1  FOR LOGIN Sales1;  
+CREATE USER Sales2  FOR LOGIN Sales2 ;
+
+#Create a table to hold data
+
+CREATE TABLE Sales  
+    (  
+    OrderID int,  
+    SalesRep sysname,  
+    Product varchar(10),  
+    Qty int  
+    );
+    
+#Populate the table with six rows of data, showing three orders for each sales representative
+INSERT INTO Sales VALUES (1, 'Sales1', 'Valve', 5);
+INSERT INTO Sales VALUES (2, 'Sales1', 'Wheel', 2);
+INSERT INTO Sales VALUES (3, 'Sales1', 'Valve', 4);
+INSERT INTO Sales VALUES (4, 'Sales2', 'Bracket', 2);
+INSERT INTO Sales VALUES (5, 'Sales2', 'Wheel', 5);
+INSERT INTO Sales VALUES (6, 'Sales2', 'Seat', 5);
+-- View the 6 rows in the table  
+SELECT * FROM Sales;
+
+#Create an Azure Synapse external table from the Sales table you just created
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = '<user_password>';
+
+CREATE DATABASE SCOPED CREDENTIAL msi_cred WITH IDENTITY = 'Managed Service Identity';
+
+CREATE EXTERNAL DATA SOURCE ext_datasource_with_abfss WITH (TYPE = hadoop, LOCATION = 'abfss://<file_system_name@storage_account>.dfs.core.windows.net', CREDENTIAL = msi_cred);
+
+CREATE EXTERNAL FILE FORMAT MSIFormat  WITH (FORMAT_TYPE=DELIMITEDTEXT);
+  
+CREATE EXTERNAL TABLE Sales_ext WITH (LOCATION='<your_table_name>', DATA_SOURCE=ext_datasource_with_abfss, FILE_FORMAT=MSIFormat, REJECT_TYPE=Percentage, REJECT_SAMPLE_VALUE=100, REJECT_VALUE=100)
+AS SELECT * FROM sales;
+
+#Grant SELECT for the three users on the external table Sales_ext that you created
+GRANT SELECT ON Sales_ext TO Sales1;  
+GRANT SELECT ON Sales_ext TO Sales2;  
+GRANT SELECT ON Sales_ext TO Manager;
+
+#Create a new schema, and an inline table-valued function, you may have completed this in example A
+#The function returns 1 when a row in the SalesRep column is the same as the user executing the query (@SalesRep = USER_NAME()) or if the user executing the query is the Manager user (USER_NAME() = 'Manager')
+CREATE SCHEMA Security;  
+GO  
+  
+CREATE FUNCTION Security.fn_securitypredicate(@SalesRep AS sysname)  
+    RETURNS TABLE  
+WITH SCHEMABINDING  
+AS  
+    RETURN SELECT 1 AS fn_securitypredicate_result
+WHERE @SalesRep = USER_NAME() OR USER_NAME() = 'Manager';
+
+#Create a security policy on your external table using the inline table-valued function as a filter predicate. 
+#The state must be set to ON to enable the policy
+CREATE SECURITY POLICY SalesFilter_ext
+ADD FILTER PREDICATE Security.fn_securitypredicate(SalesRep)
+ON dbo.Sales_ext  
+WITH (STATE = ON);
+
+#Now test the filtering predicate, by selecting from the Sales_ext external table
+#Sign in as each user, Sales1, Sales2, and manager. Run the following command as each user
+SELECT * FROM Sales_ext;
+
+#The Manager should see all six rows. The Sales1 and Sales2 users should only see their sales.
+#Alter the security policy to disable the policy
+ALTER SECURITY POLICY SalesFilter_ext  
+WITH (STATE = OFF);
+
+#Now the Sales1 and Sales2 users can see all six rows.
+#Connect to the Azure Synapse database to clean up resources
+
+DROP USER Sales1;
+DROP USER Sales2;
+DROP USER Manager;
+
+DROP SECURITY POLICY SalesFilter_ext;
+DROP TABLE Sales;
+DROP EXTERNAL TABLE Sales_ext;
+DROP EXTERNAL DATA SOURCE ext_datasource_with_abfss ;
+DROP EXTERNAL FILE FORMAT MSIFormat;
+DROP DATABASE SCOPED CREDENTIAL msi_cred; 
+DROP MASTER KEY;
+
+#Connect to logical master to clean up resources
+DROP LOGIN Sales1;
+DROP LOGIN Sales2;
+DROP LOGIN Manager;
+
+#Dynamic Data Masking
+#Set up Dynamic Data Masking for your database in Azure Synapse Analytics using PowerShell cmdlets
+#The Get-AzSqlDatabaseDataMaskingPolicy gets the data masking policy for a database
+#The syntax for the Get-AzSqlDatabaseDataMaskingPolicy in PowerShell is as follows:
+Get-AzSqlDatabaseDataMaskingPolicy [-ServerName] <String> [-DatabaseName] <String>
+ [-ResourceGroupName] <String> [-DefaultProfile <IAzureContextContainer>] [-WhatIf] [-Confirm]
+ [<CommonParameters>]
+ 
+#The Set-AzSqlDatabaseDataMaskingPolicy sets data masking for a database
+#The syntax for the Set-AzSqlDatabaseDataMaskingPolicy in PowerShell is as follows:
+Set-AzSqlDatabaseDataMaskingPolicy [-PassThru] [-PrivilegedUsers <String>] [-DataMaskingState <String>]
+ [-ServerName] <String> [-DatabaseName] <String> [-ResourceGroupName] <String>
+ [-DefaultProfile <IAzureContextContainer>] [-WhatIf] [-Confirm] [<CommonParameters>]
+ 
+ #The Get-AzSqlDatabaseDataMaskingRule Gets the data masking rules from a database
+ The syntax for the Get-AzSqlDatabaseDataMaskingRule in PowerShell is as follows:
+ Get-AzSqlDatabaseDataMaskingRule [-SchemaName <String>] [-TableName <String>] [-ColumnName <String>]
+ [-ServerName] <String> [-DatabaseName] <String> [-ResourceGroupName] <String>
+ [-DefaultProfile <IAzureContextContainer>] [-WhatIf] [-Confirm] [<CommonParameters>]
+ 
+ #The New-AzSqlDatabaseDataMaskingRule creates a data masking rule for a database.
+ #The syntax for the New-AzSqlDatabaseDataMaskingRule in PowerShell is as follows:
+ New-AzSqlDatabaseDataMaskingRule -MaskingFunction <String> [-PrefixSize <UInt32>] [-ReplacementString <String>]
+ [-SuffixSize <UInt32>] [-NumberFrom <Double>] [-NumberTo <Double>] [-PassThru] -SchemaName <String>
+ -TableName <String> -ColumnName <String> [-ServerName] <String> [-DatabaseName] <String>
+ [-ResourceGroupName] <String> [-DefaultProfile <IAzureContextContainer>] [-WhatIf] [-Confirm]
+ [<CommonParameters>]
+ 
+ #The Remove-AzSqlDatabaseDataMaskingRule removes a data masking rule from a database.
+ #The syntax for the Remove-AzSqlDatabaseDataMaskingRule in PowerShell is as follows:
+ Remove-AzSqlDatabaseDataMaskingRule [-PassThru] [-Force] -SchemaName <String> -TableName <String>
+ -ColumnName <String> [-ServerName] <String> [-DatabaseName] <String> [-ResourceGroupName] <String>
+ [-DefaultProfile <IAzureContextContainer>] [-WhatIf] [-Confirm] [<CommonParameters>]
+ 
+ #The Set-AzSqlDatabaseDataMaskingRule Sets the properties of a data masking rule for a database
+ #The syntax for the Set-AzSqlDatabaseDataMaskingRule in PowerShell is as follows:
+ Set-AzSqlDatabaseDataMaskingRule [-MaskingFunction <String>] [-PrefixSize <UInt32>]
+ [-ReplacementString <String>] [-SuffixSize <UInt32>] [-NumberFrom <Double>] [-NumberTo <Double>] [-PassThru]
+ -SchemaName <String> -TableName <String> -ColumnName <String> [-ServerName] <String> [-DatabaseName] <String>
+ [-ResourceGroupName] <String> [-DefaultProfile <IAzureContextContainer>] [-WhatIf] [-Confirm]
+ [<CommonParameters>]
+ 
+ #For setting up Dynamic Data Masking in Azure Synapse Analytics, you can also make use of the REST API
+ #The Create Or Update masking policy using the REST API will create or update a database data masking policy
+ #In HTTP the following request can be made:
+ PUT https://management.azure.com/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Sql/servers/{serverName}/databases/{databaseName}/dataMaskingPolicies/Default?api-version=2014-04-01
+ 
+ #The Get policy, gets a database data masking policy
+ #In HTTP the following request can be made:
+ GET https://management.azure.com/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Sql/servers/{serverName}/databases/{databaseName}/dataMaskingPolicies/Default?api-version=2014-04-01
+ 
+ #The Create or Update masking rule creates or updates a database data masking rule.
+ #In HTTP the following request can be made:
+ PUT https://management.azure.com/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Sql/servers/{serverName}/databases/{databaseName}/dataMaskingPolicies/Default/rules/{dataMaskingRuleName}?api-version=2014-04-01
+ 
+ #The List By Database request gets a list of database data masking rules
+ #In HTTP the following request can be made:
+ GET https://management.azure.com/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Sql/servers/{serverName}/databases/{databaseName}/dataMaskingPolicies/Default/rules?api-version=2014-04-01
+ 
+ #Securing your credentials through linked services with TokenLibrary for Apache Spark
+ #An example can be found below: In order to connect to other linked services, you are enabled to make a direct call to TokenLibrary by retrieving the connection string
+ #In order to retrieve the connection string, use the getConnectionString function and pass in the linked service name
+ // Scala
+// retrieve connectionstring from TokenLibrary
+
+import com.microsoft.azure.synapse.tokenlibrary.TokenLibrary
+
+val connectionString: String = TokenLibrary.getConnectionString("<LINKED SERVICE NAME>")
+println(connectionString)
+
+# Python
+# retrieve connectionstring from TokenLibrary
+
+from pyspark.sql import SparkSession
+
+sc = SparkSession.builder.getOrCreate()
+token_library = sc._jvm.com.microsoft.azure.synapse.tokenlibrary.TokenLibrary
+connection_string = token_library.getConnectionString("<LINKED SERVICE NAME>")
+print(connection_string)
+
+#use the getConnectionStringAsMap function and pass the key to return the value
+// Linked services can be used for storing and retreiving credentials (e.g, account key)
+// Example connection string (for storage): "DefaultEndpointsProtocol=https;AccountName=<accountname>;AccountKey=<accountkey>"
+import com.microsoft.azure.synapse.tokenlibrary.TokenLibrary
+
+val accountKey: String = TokenLibrary.getConnectionStringAsMap("<LINKED SERVICE NAME">).get("<KEY NAME>")
+println(accountKey)
+
+# Linked services can be used for storing and retreiving credentials (e.g, account key)
+# Example connection string (for storage): "DefaultEndpointsProtocol=https;AccountName=<accountname>;AccountKey=<accountkey>"
+from pyspark.sql import SparkSession
+
+sc = SparkSession.builder.getOrCreate()
+token_library = sc._jvm.com.microsoft.azure.synapse.tokenlibrary.TokenLibrary
+accountKey = token_library.getConnectionStringAsMap("<LINKED SERVICE NAME>").get("<KEY NAME>")
+print(accountKey)
+ 
